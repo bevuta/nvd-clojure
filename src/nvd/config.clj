@@ -201,12 +201,7 @@ You can pass an empty string for an .edn file to be automatically created."
       (.setStringIfNotEmpty settings prop (str (get-in nvd-settings path))))
 
     (when (= ::not-found (get-in nvd-settings [:nvd-api :key] ::not-found))
-      (let [api-key (System/getenv "NVD_API_TOKEN")]
-
-        (when (or (not api-key)
-                  (string/blank? api-key))
-          (throw (ex-info "No NVD API key supplied as config settings or env var." {})))
-
+      (when-let [api-key (System/getenv "NVD_API_TOKEN")]
         (.setString settings Settings$KEYS/NVD_API_KEY api-key)))
 
     (-> project
