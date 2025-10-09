@@ -30,6 +30,7 @@
    [trptcolin.versioneer.core :refer [get-version]])
   (:import
    (java.io File)
+   (java.util.regex Pattern)
    (org.owasp.dependencycheck Engine)
    (org.owasp.dependencycheck.exception ExceptionCollection)))
 
@@ -37,17 +38,33 @@
   (delay {:nvd-clojure (get-version "nvd-clojure" "nvd-clojure")
           :dependency-check (.getImplementationVersion (.getPackage Engine))}))
 
-(defn jar? [^String filename]
-  (.endsWith filename ".jar"))
+(def classpath-separator-re
+  (re-pattern (Pattern/quote File/pathSeparator)))
 
 (defn absolute-path ^String [file]
-  (s/replace-first file #"^~" (System/getProperty "user.home")))
+  (s/replace-first file #"^~(?=$|/)" (System/getProperty "user.home")))
+
+(defn parse-classpath
+  "Accepts a classpath string (i.e. colon-separated paths) and returns a sequence of analyzable
+  absolute paths.
+
+  In particular, source paths such as `src`, while part of the classpath, won't be meaningfully
+  analyzed by dependency-check-core. We only care about regular files (e.g. *.jar or
+  package-lock.json). Thus, skip directories in general as well as non-existing files."
+  [classpath-string]
+  (into []
+        (comp (map absolute-path)
+              (remove (fn [^String s]
+                        (let [file (io/file s)]
+                          (or (.isDirectory file)
+                              (not (.exists file)))))))
+        (s/split classpath-string classpath-separator-re)))
 
 (defn- scan-and-analyze [project]
   (let [^Engine engine (:engine project)]
+    ;; See `parse-classpath` for details on which classpath entries are considered here.
     (doseq [p (:classpath project)]
-      (when (jar? p)
-        (.scan engine (absolute-path p))))
+      (.scan engine (absolute-path p)))
     (try
       (.analyzeDependencies engine)
       (catch ExceptionCollection e
@@ -94,25 +111,18 @@
         fail-build?
         conditional-exit)))
 
-(def classpath-separator-re
-  (re-pattern (str File/pathSeparatorChar)))
-
 (defn -main [& [config-filename ^String classpath-string]]
   (when (s/blank? classpath-string)
     (throw (ex-info "nvd-clojure requires a classpath value to be explicitly passed as a CLI argument.
 Older usages are deprecated." {})))
 
-  (let [classpath (s/split classpath-string classpath-separator-re)
-        classpath (into []
-                        (remove (fn [^String s]
-                                  ;; Only .jar (and perhaps .zip) files are relevant.
-                                  ;; source paths such as `src`, while are part of the classpath,
-                                  ;; won't be meaningfully analyzed by dependency-check-core.
-                                  ;; Keeping only .jars facilitates various usage patterns.
-                                  (let [file (io/file s)]
-                                    (or (.isDirectory file)
-                                        (not (.exists file))))))
-                        classpath)]
+  (let [classpath (parse-classpath classpath-string)]
+
+    (when (empty? classpath)
+      (throw (ex-info "No entries in given classpath qualify for analysis.
+
+Note that only regular files (non-directories) are considered."
+                      {:classpath classpath-string})))
 
     (when-not (System/getProperty "nvd-clojure.internal.skip-self-check")
       (when-let [bad-entry (->> classpath
@@ -126,19 +136,6 @@ Older usages are deprecated." {})))
 Please refer to the project's README for recommended usages."
                         {:bad-entry bad-entry
                          :classpath classpath-string}))))
-
-    ;; perform some sanity checks for ensuring the calculated classpath has the expected format:
-    (let [f (-> classpath ^String (first) File.)]
-      (when-not (.exists f)
-        (throw (ex-info (str "The classpath variable should be a vector of simple strings denoting existing files: "
-                             (pr-str f))
-                        {}))))
-
-    (let [f (-> classpath ^String (last) File.)]
-      (when-not (.exists f)
-        (throw (ex-info (str "The classpath variable should be a vector of simple strings denoting existing files: "
-                             (pr-str f))
-                        {}))))
 
     ;; specifically handle blank strings (in addition to nil)
     ;; so that CLI callers can skip the first argument by simply passing an empty string:
